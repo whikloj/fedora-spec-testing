@@ -12,4 +12,21 @@ If you have the Fedora source code, you can use the following commands:
     mvn clean install -pl fcrepo-webapp -Pone-click
     java -jar fcrepo-webapp/target/fcrepo-webapp-5.0.0-SNAPSHOT-jetty-console.jar --headless
 
-Then, from this directory, run `pytest`
+Then, from this directory, run `./api-spec.py`
+
+### Configuration
+
+The `api-spec.py` script accepts 3 arguments
+
+```
+--baseurl=
+```
+
+To define the root of your repository
+
+```
+--username=
+--password=
+```
+
+To define a username/password for authentication
