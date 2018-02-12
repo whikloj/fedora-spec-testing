@@ -1,15 +1,58 @@
-import requests, pytest, re
-ROOT = 'http://127.0.0.1:8080/rest'
+#!/bin/env python3
+
+import requests
+import pytest
+import re
+
+#baseurl = "http://127.0.0.1:8080/rest"
+#username = "fedoraAdmin"
+#password = "fedoraAdmin"
+
 PAYLOAD_HEADERS = ['Content-Length', 'Content-Range', 'Trailer', 'Transfer-Encoding'] # Via RFC 7231 3.3
 
-support_delete = pytest.mark.skipif('DELETE' not in requests.head(ROOT).headers['Allow'],
-        reason='3.7 DELETE: (OPTIONAL) Delete method not supported')
+
+def pytest.apytest_addopts(parser):
+    parser.addoption("--baseurl", dest="baseurl", action="store", help="Root URL of Fedora instance")
+    parser.addoption("--username", dest="username", action="store", help="Username if required")
+    parser.addoption("--password", dest="password", action="store", help="Password if required")
+
 
 @pytest.fixture(scope='module')
-def nodes():
+def baseurl(request):
+    return request.config.getoption("--baseurl", "http://127.0.0.1:8080/rest")
+
+
+@pytest.fixture(scope='module')
+def username(request):
+    return request.config.getoption("--username", None)
+
+
+@pytest.fixture(scope='module')
+def password(request):
+    return request.config.getoption("--password", None)
+
+
+def pytest_collection_modifyitems(config, items):
+    baseurl = config.getoption("--baseurl", "http://127.0.0.1:8080/rest")
+    username = config.getoption("--username", None)
+    password = config.getoption("--password", None)
+    if 'DELETE' not in requests.head(baseurl, auth=(username, password)).headers['Allow']:
+        support_delete = pytest.mark.skip(reason='3.7 DELETE: (OPTIONAL) Delete method not supported')
+        for item in items:
+            if "support_delete" not in item.keywords:
+                item.add_marker(support_delete)
+
+
+@pytest.fixture(scope='module')
+def nodes(baseurl, username, password):
     """Ensures ROOT is accessible and nodes are deleted after testing"""
     # Ensure ROOT is accessible.
-    r = requests.get(ROOT)
+    r = requests.get(baseurl, auth=(username, password))
+
+    if r.status_code == 403:
+        print("\nReceived a 403 on Fedora base url, you might need to define --username and --password\n")
+        quit()
+
     assert r.status_code == 200, 'Fedora root not found. Is Fedora running at the ROOT url?'
 
     nodes = set()
@@ -19,16 +62,32 @@ def nodes():
         requests.delete(node)
         requests.delete(node + '/fcr:tombstone')
 
+
 @pytest.fixture(scope='module')
 def files():
     """Provides a file for LDP-NR tests"""
     with open('./image.jpg', 'rb') as image:
         yield {'file': image}
 
+
 # POST
+def test_create_ldpc(nodes):
+    body = "".join(["@prefix ldp: <http://www.w3.org/ns/ldp#> .",
+                    "@prefix dcterms: <http://purl.org/dc/terms/> .",
+                    "<> a ldp:Container, ldp:BasicContainer;",
+                    "dcterms:title 'Container class Container' ;",
+                    "dcterms:description 'This is a test container for the Fedora API Test Suite.' ."])
+    headers = {"Content-Type" : "text/turtle", "Link": "<http://www.w3.org/ns/ldp#BasicContainer>; rel=\"type\"",
+               "Slug": "Container-3.1.1-A"}
+
+    r = requests.post(baseurl, body, None, headers=headers, auth=(username, password))
+
+    assert r.status_code == 201, '3.1.1 POST: Error creating an LDPC'
+
+
 def test_create_ldp_rs(nodes):
     # Can create an LDP-RS with POST
-    r = requests.post(ROOT)
+    r = requests.post(baseurl, auth=(username, password))
     assert r.status_code == 201, '3.3 POST: Error creating an LDP-RS'
     nodes.add(r.headers['Location'])
 
@@ -41,7 +100,7 @@ def test_create_ldp_rs(nodes):
 
 def test_create_ldp_nr(nodes, files):
     # Can create an LDP-NR with POST
-    r = requests.post(ROOT, files=files)
+    r = requests.post(baseurl, files=files)
     assert r.status_code == 201, '3.3 POST: Error creating an LDP-NR'
     nodes.add(r.headers['Location'])
 
@@ -54,7 +113,7 @@ def test_create_ldp_nr(nodes, files):
 
 def test_describe_ldp_nr(nodes, files):
     # Can create an LDP-NR with POST
-    r = requests.post(ROOT, files=files)
+    r = requests.post(baseurl, files=files)
     assert r.status_code == 201, '3.3 POST: Error creating an LDP-NR'
     nodes.add(r.headers['Location'])
 
@@ -69,7 +128,7 @@ def test_describe_ldp_nr(nodes, files):
 
 def test_bad_digest(nodes, files):
     # LDP-NR with bad digest value returns 409
-    r = requests.post(ROOT, files=files, headers={'digest': 'md5=deadbeef'})
+    r = requests.post(baseurl, files=files, headers={'digest': 'md5=deadbeef'})
     assert r.status_code == 409, '3.3.1 POST: Creating LDP-NR with bad digest value should return 409'
     if r.status_code == 201:
         nodes.add(r.headers['Location'])
@@ -77,7 +136,7 @@ def test_bad_digest(nodes, files):
 def test_bad_algo(nodes, files):
     # LDP-NR with bad digest algorithm returns 400
     # TODO: How to query for accepted algorithms?
-    r = requests.post(ROOT, files=files, headers={'digest': 'md1=fakealgo'})
+    r = requests.post(baseurl, files=files, headers={'digest': 'md1=fakealgo'})
     assert r.status_code == 400, '3.3.1 POST: Creating LDP-NR with bad digest algorithm should return 400'
     if r.status_code == 201:
         nodes.add(r.headers['Location'])
@@ -85,7 +144,7 @@ def test_bad_algo(nodes, files):
 # GET
 def test_representation(nodes):
     # Setup: Create LDP-RS
-    r = requests.post(ROOT)
+    r = requests.post(baseurl)
     r.raise_for_status
     ldp_rs = r.headers['Location']
     nodes.add(ldp_rs)
@@ -100,7 +159,7 @@ def test_representation(nodes):
 
 def test_contained_desc(nodes):
     # Setup: Create LDP-RSs
-    r = requests.post(ROOT)
+    r = requests.post(baseurl)
     r.raise_for_status
     parent = r.headers['Location']
     nodes.add(parent)
@@ -117,7 +176,7 @@ def test_contained_desc(nodes):
 
 def test_inbound_refs(nodes):
     # Setup: Create LDP-RSs
-    r = requests.post(ROOT)
+    r = requests.post(baseurl)
     r.raise_for_status
     parent = r.headers['Location']
     nodes.add(parent)
@@ -135,7 +194,7 @@ def test_inbound_refs(nodes):
 
 def test_want_digest_header(nodes, files):
     # Setup: Create LDP-NR
-    r = requests.post(ROOT, files=files)
+    r = requests.post(baseurl, files=files)
     r.raise_for_status
     ldp_nr = r.headers['Location']
     nodes.add(ldp_nr)
@@ -151,7 +210,7 @@ def test_want_digest_header(nodes, files):
 # HEAD
 def test_empty_ldp_rs(nodes):
     # Setup
-    r = requests.post(ROOT)
+    r = requests.post(baseurl)
     r.raise_for_status
     ldp_rs = r.headers['Location']
     nodes.add(ldp_rs)
@@ -163,7 +222,7 @@ def test_empty_ldp_rs(nodes):
 
 def test_no_payload_headers(nodes):
     # Setup
-    r = requests.post(ROOT)
+    r = requests.post(baseurl)
     r.raise_for_status
     ldp_rs = r.headers['Location']
     nodes.add(ldp_rs)
@@ -175,7 +234,7 @@ def test_no_payload_headers(nodes):
 
 def test_same_headers(nodes):
     # Setup
-    r = requests.post(ROOT)
+    r = requests.post(baseurl)
     r.raise_for_status
     ldp_rs = r.headers['Location']
     nodes.add(ldp_rs)
@@ -190,7 +249,7 @@ def test_same_headers(nodes):
 
 def test_empty_ldp_nr(nodes, files):
     # Setup
-    r = requests.post(ROOT, files=files)
+    r = requests.post(baseurl, files=files)
     r.raise_for_status
     ldp_nr = r.headers['Location']
     nodes.add(ldp_nr)
@@ -201,7 +260,7 @@ def test_empty_ldp_nr(nodes, files):
 
 def test_head_digest(nodes, files):
     # Setup
-    r = requests.post(ROOT, files=files)
+    r = requests.post(baseurl, files=files)
     r.raise_for_status
     ldp_nr = r.headers['Location']
     nodes.add(ldp_nr)
@@ -220,11 +279,13 @@ def test_head_digest(nodes, files):
 
 # PATCH
 
-# DELETE
-@support_delete
+"""
+ DELETE
+"""
+@pytest.mark.support_delete
 def test_depth_zero(nodes):
     # Setup
-    r = requests.post(ROOT)
+    r = requests.post(baseurl)
     r.raise_for_status
     parent = r.headers['Location']
     nodes.add(parent)
@@ -242,10 +303,11 @@ def test_depth_zero(nodes):
     r = requests.get(child)
     assert r.status_code == 200, '3.7.1 DELETE: Depth:0 should delete the resource only'
 
-@support_delete
+
+@pytest.mark.support_delete
 def test_depth_infinity(nodes):
     # Setup
-    r = requests.post(ROOT)
+    r = requests.post(baseurl)
     r.raise_for_status
     parent = r.headers['Location']
     nodes.add(parent)
@@ -266,10 +328,11 @@ def test_depth_infinity(nodes):
     r = requests.get(grandchild)
     assert r.status_code == 410
 
-@support_delete
+
+@pytest.mark.support_delete
 def test_unsupported_depth(nodes):
     # Setup
-    r = requests.post(ROOT)
+    r = requests.post(baseurl)
     r.raise_for_status
     ldp_rs = r.headers['Location']
     nodes.add(ldp_rs)
